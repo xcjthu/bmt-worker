@@ -37,7 +37,7 @@ def checkpoint(filename, model, optimizer, trained_epoch, config, global_step, l
         logger.warning("Cannot save models with error %s, continue anyway" % str(e))
 
 
-def train(parameters, config, gpu_list, do_test=False):
+def train(parameters, config, gpu_list, do_test=False, only_eval=False):
     epoch = config.getint("train", "epoch")
     batch_size = config.getint("train", "batch_size")
 
@@ -96,88 +96,88 @@ def train(parameters, config, gpu_list, do_test=False):
         if hasattr(dataset, "dataset") and isinstance(dataset.dataset, KaraPytorchDatasetBase): 
             dataset.dataset.set_epoch(epoch_num)
 
-    
-        for step, data in enumerate(dataset):
-            # print(bmt.rank(), "step")
-            if epoch_num == 1 and step < parameters["skip-step"]:
-                print_rank("skip step %s" % step, end="\r")
+        if not only_eval:
+            for step, data in enumerate(dataset):
+                # print(bmt.rank(), "step")
+                if epoch_num == 1 and step < parameters["skip-step"]:
+                    print_rank("skip step %s" % step, end="\r")
+                    continue
+                for key in data.keys():
+                    if isinstance(data[key], torch.Tensor):
+                        if len(gpu_list) > 0:
+                            data[key] = Variable(data[key].cuda())
+                        else:
+                            data[key] = Variable(data[key])
+                # break
+                results = model(data, config, gpu_list, acc_result, "train")
+
+                loss, acc_result = results["loss"], results["acc_result"]
+                total_loss += bmt.sum_loss(loss).item()
+
+                loss = loss / grad_accumulate
+                # loss = optimizer.loss_scale(loss)
+                # loss.backward()
+                optim_manager.backward(loss)
+
+                if output_grad and step % output_grad_step == 0:
+                    inpsector = config.get("train", "inspector_para")
+                    bmt.print_rank(bmt.inspect.format_summary(bmt.inspect.inspect_model(model, inpsector)))
+                    # bmt.print_rank(bmt.inspect.format_summary(bmt.inspect.inspect_model(model, "que_model.*")))
+                
+                grad_norm=None
+                if (step + 1) % grad_accumulate == 0:
+                    if max_grad_norm is not None and max_grad_norm > 0:
+                        grad_norm = optim_manager.clip_grad_norm(optimizer.param_groups, max_grad_norm, norm_type=2)
+                        grad_norm = grad_norm.item()
+                    # bmt.optim_step(optimizer, lr_scheduler)
+                    optim_manager.step()
+                    # if math.isnan(grad_norm):
+                    #     inpsector = config.get("train", "inspector_para")
+                    #     bmt.print_rank(bmt.inspect.format_summary(bmt.inspect.inspect_model(model, inpsector)))
+                    optim_manager.zero_grad()
+
+                if step % output_time == 0:
+                # if grad_norm is not None or max_grad_norm is None or max_grad_norm == 0:
+                    output_info = output_function(acc_result, config)
+
+                    delta_t = timer() - start_time
+
+                    output_value(current_epoch, "train", "%d/%d" % (step + 1, total_len), "%s/%s" % (
+                        gen_time_str(delta_t), gen_time_str(delta_t * (total_len - step - 1) / (step + 1))),
+                                "%.3lf" % (total_loss / (step + 1 - parameters["skip-step"])), output_info, None, config, lr_scheduler.current_lr, "grad_norm: %s" % grad_norm)
+
+                if save_step > 0 and step > 0 and step % save_step == 0:
+                    print_rank("=" * 10, "saving model", "=" * 10)
+                    checkpoint(os.path.join(output_path, "%d.pkl" % current_epoch), model, optimizer, current_epoch, config, global_step, lr_scheduler)
+
+                global_step += 1
+                if (step + 1) % grad_accumulate == 0 and valid_mode == 'step' and int((step + 1) / grad_accumulate) % step_epoch == 0:
+                    acc_result = None
+                    checkpoint(os.path.join(output_path, "%d.pkl" % current_epoch), model, optimizer, current_epoch, config, global_step, lr_scheduler)
+                    if not no_valid:
+                        with torch.no_grad():
+                            valid(model, parameters["valid_dataset"], current_epoch, config, gpu_list, output_function)
+                            if do_test:
+                                valid(model, test_dataset, current_epoch, config, gpu_list, output_function, mode="test")
+
+            if step == -1:
+                output_log(logger, "No data in this epoch", logging.ERROR)
+                # logger.error("There is no data given to the model in this epoch, check your data.")
+                raise NotImplementedError
+
+            print_rank(valid_mode != "batch", no_valid)
+            if (valid_mode != "batch") or no_valid:
+                print_rank("skip validation")
                 continue
-            for key in data.keys():
-                if isinstance(data[key], torch.Tensor):
-                    if len(gpu_list) > 0:
-                        data[key] = Variable(data[key].cuda())
-                    else:
-                        data[key] = Variable(data[key])
-            # break
-            results = model(data, config, gpu_list, acc_result, "train")
 
-            loss, acc_result = results["loss"], results["acc_result"]
-            total_loss += bmt.sum_loss(loss).item()
+            output_info = output_function(acc_result, config)
+            delta_t = timer() - start_time
+            output_value(current_epoch, "train", "%d/%d" % (step + 1, total_len), "%s/%s" % (
+                gen_time_str(delta_t), gen_time_str(delta_t * (total_len - step - 1) / (step + 1))),
+                        "%.3lf" % (total_loss / (step + 1)), output_info, None, config)
+            print_rank("==" * 10, "begin saving model and validation", "==" * 10)
 
-            loss = loss / grad_accumulate
-            # loss = optimizer.loss_scale(loss)
-            # loss.backward()
-            optim_manager.backward(loss)
-
-            if output_grad and step % output_grad_step == 0:
-                inpsector = config.get("train", "inspector_para")
-                bmt.print_rank(bmt.inspect.format_summary(bmt.inspect.inspect_model(model, inpsector)))
-                # bmt.print_rank(bmt.inspect.format_summary(bmt.inspect.inspect_model(model, "que_model.*")))
-            
-            grad_norm=None
-            if (step + 1) % grad_accumulate == 0:
-                if max_grad_norm is not None and max_grad_norm > 0:
-                    grad_norm = optim_manager.clip_grad_norm(optimizer.param_groups, max_grad_norm, norm_type=2)
-                    grad_norm = grad_norm.item()
-                # bmt.optim_step(optimizer, lr_scheduler)
-                optim_manager.step()
-                # if math.isnan(grad_norm):
-                #     inpsector = config.get("train", "inspector_para")
-                #     bmt.print_rank(bmt.inspect.format_summary(bmt.inspect.inspect_model(model, inpsector)))
-                optim_manager.zero_grad()
-
-            if step % output_time == 0:
-            # if grad_norm is not None or max_grad_norm is None or max_grad_norm == 0:
-                output_info = output_function(acc_result, config)
-
-                delta_t = timer() - start_time
-
-                output_value(current_epoch, "train", "%d/%d" % (step + 1, total_len), "%s/%s" % (
-                    gen_time_str(delta_t), gen_time_str(delta_t * (total_len - step - 1) / (step + 1))),
-                            "%.3lf" % (total_loss / (step + 1 - parameters["skip-step"])), output_info, None, config, lr_scheduler.current_lr, "grad_norm: %s" % grad_norm)
-
-            if save_step > 0 and step > 0 and step % save_step == 0:
-                print_rank("=" * 10, "saving model", "=" * 10)
-                checkpoint(os.path.join(output_path, "%d.pkl" % current_epoch), model, optimizer, current_epoch, config, global_step, lr_scheduler)
-
-            global_step += 1
-            if (step + 1) % grad_accumulate == 0 and valid_mode == 'step' and int((step + 1) / grad_accumulate) % step_epoch == 0:
-                acc_result = None
-                checkpoint(os.path.join(output_path, "%d.pkl" % current_epoch), model, optimizer, current_epoch, config, global_step, lr_scheduler)
-                if not no_valid:
-                    with torch.no_grad():
-                        valid(model, parameters["valid_dataset"], current_epoch, config, gpu_list, output_function)
-                        if do_test:
-                            valid(model, test_dataset, current_epoch, config, gpu_list, output_function, mode="test")
-
-        if step == -1:
-            output_log(logger, "No data in this epoch", logging.ERROR)
-            # logger.error("There is no data given to the model in this epoch, check your data.")
-            raise NotImplementedError
-
-        print_rank(valid_mode != "batch", no_valid)
-        if (valid_mode != "batch") or no_valid:
-            print_rank("skip validation")
-            continue
-
-        output_info = output_function(acc_result, config)
-        delta_t = timer() - start_time
-        output_value(current_epoch, "train", "%d/%d" % (step + 1, total_len), "%s/%s" % (
-            gen_time_str(delta_t), gen_time_str(delta_t * (total_len - step - 1) / (step + 1))),
-                    "%.3lf" % (total_loss / (step + 1)), output_info, None, config)
-        print_rank("==" * 10, "begin saving model and validation", "==" * 10)
-
-        checkpoint(os.path.join(output_path, "%d.pkl" % current_epoch), model, optimizer, current_epoch, config, global_step, lr_scheduler)
+            checkpoint(os.path.join(output_path, "%d.pkl" % current_epoch), model, optimizer, current_epoch, config, global_step, lr_scheduler)
 
         # ckp = "../checkpoint/SQuADED2LM-large/model-%s.pkl" % epoch_num
         # print(bmt.load(model, ckp, strict=False))

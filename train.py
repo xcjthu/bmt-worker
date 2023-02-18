@@ -44,6 +44,7 @@ if __name__ == "__main__":
     parser.add_argument('--comment', help="checkpoint file path", default=None)
     parser.add_argument('--hyper_para', "-hp", default=None)
     parser.add_argument('--skip_step', type=int, default=0)
+    parser.add_argument('--only_eval', action="store_true")
     args = parser.parse_args()
 
     configFilePath = args.config
@@ -79,4 +80,4 @@ if __name__ == "__main__":
     print_config(config)
 
     print_rank(args.comment)
-    train(parameters, config, gpu_list, do_test)
+    train(parameters, config, gpu_list, do_test, args.only_eval)
