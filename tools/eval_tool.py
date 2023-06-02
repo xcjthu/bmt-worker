@@ -89,7 +89,7 @@ def valid(model, dataset, epoch, config, gpu_list, output_function, mode="valid"
         logger.error("There is no data given to the model in this epoch, check your data.")
         raise NotImplementedError
 
-    if acc_result is not None and config.getboolean("distributed", "use") and type(acc_result) != list:
+    if acc_result is not None and type(acc_result) != list:
         if "train" in acc_result:
             acc_result.pop("train")
         total_loss = bmt.sum_loss(torch.tensor(total_loss).cuda()).item()
