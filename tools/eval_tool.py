@@ -74,7 +74,7 @@ def valid(model, dataset, epoch, config, gpu_list, output_function, mode="valid"
                     data[key] = Variable(data[key].cuda())
                 else:
                     data[key] = Variable(data[key])
-        results = model(data, config, gpu_list, acc_result, "valid")
+        results = model(data, config, gpu_list, acc_result, mode) #"valid")
 
         loss, acc_result = results["loss"], results["acc_result"]
         total_loss += bmt.sum_loss(loss).item()
